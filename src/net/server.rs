@@ -1,4 +1,3 @@
-use bevy::log::info;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::channel;
@@ -15,7 +14,7 @@ pub struct Server {
 }
 
 impl Server {
-    async fn new(addr: &str) -> Arc<Self> {
+    pub async fn new(addr: &str) -> Arc<Self> {
         let listener = TcpListener::bind(addr).await.unwrap();
         let (sender, receiver) = channel::<Event>(100);
         let clients: Arc<Mutex<Vec<Client>>> = Arc::new(Mutex::new(Vec::new()));
@@ -34,22 +33,29 @@ impl Server {
         server
     }
 
-    async fn start(&self) {
+    pub async fn start(&self) {
         loop {
             let (stream, _) = self.listener.accept().await.unwrap();
-            let client = Client::new(stream);
-            self.clients.lock().unwrap().push(client);
+            let client = Arc::new(tokio::sync::Mutex::new(Client::new(stream)));
+
+            let client_clone = client.clone();
+            tokio::spawn(async move {
+                let mut client = client_clone.lock().await;
+                while let Some(event) = client.receive_event().await {
+                    println!("Received: {:?}", event);
+                }
+            });
         }
     }
 
-    async fn broadcast_event(&self, event: Event) {
+    pub async fn broadcast_event(&self, event: Event) {
         self.sender.send(event).await.unwrap();
     }
 
-    async fn event_dispatcher(&self, mut receiver: Receiver<Event>) {
+    pub async fn event_dispatcher(&self, mut receiver: Receiver<Event>) {
         while let Some(event) = receiver.recv().await {
             if let Some(event_type) = models::deserialize(&event) {
-                info!("{:#?}", event_type);
+                println!("{:#?}", event_type);
             }
         }
     }

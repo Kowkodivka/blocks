@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Event {
-    opcode: u8,
-    data: String,
+    pub opcode: u8,
+    pub data: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
