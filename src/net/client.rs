@@ -10,6 +10,10 @@ pub struct Client {
 }
 
 impl Client {
+    pub fn new(stream: TcpStream) -> Self {
+        Client { stream }
+    }
+
     pub async fn send_event(&mut self, event: &Event) {
         let serialized = bincode::serialize(event).unwrap();
         self.stream.write_all(&serialized).await.unwrap();
