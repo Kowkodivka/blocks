@@ -1,62 +1,86 @@
-use std::sync::{Arc, Mutex};
+use super::client::Client;
+use super::models::Event;
+use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::mpsc::channel;
-use tokio::sync::mpsc::Receiver;
-use tokio::sync::mpsc::Sender;
-
-use super::models;
-use super::{client::Client, models::Event};
+use tokio::sync::{
+    mpsc::{channel, Receiver, Sender},
+    Mutex,
+};
 
 pub struct Server {
     listener: TcpListener,
-    clients: Arc<Mutex<Vec<Client>>>,
-    sender: Sender<Event>,
+    clients: Arc<Mutex<Vec<Arc<Mutex<Client>>>>>,
+    event_sender: Sender<Event>,
+    event_receiver: Arc<Mutex<Receiver<Event>>>,
 }
 
 impl Server {
-    pub async fn new(addr: &str) -> Arc<Self> {
-        let listener = TcpListener::bind(addr).await.unwrap();
-        let (sender, receiver) = channel::<Event>(100);
-        let clients: Arc<Mutex<Vec<Client>>> = Arc::new(Mutex::new(Vec::new()));
+    pub async fn new(addr: &str) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind(addr).await?;
+        let (event_sender, event_receiver) = channel::<Event>(100);
+        let clients = Arc::new(Mutex::new(Vec::new()));
 
-        let server = Arc::new(Self {
+        Ok(Arc::new(Self {
             listener,
-            clients: clients.clone(),
-            sender,
-        });
-
-        let server_clone = Arc::clone(&server);
-        tokio::spawn(async move {
-            server_clone.event_dispatcher(receiver).await;
-        });
-
-        server
+            clients,
+            event_sender,
+            event_receiver: Arc::new(Mutex::new(event_receiver)),
+        }))
     }
 
-    pub async fn start(&self) {
+    pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
         loop {
-            let (stream, _) = self.listener.accept().await.unwrap();
-            let client = Arc::new(tokio::sync::Mutex::new(Client::new(stream)));
+            let (stream, _) = self.listener.accept().await?;
+            let client = Arc::new(Mutex::new(Client::new(stream)));
 
-            let client_clone = client.clone();
+            self.register_client(client.clone()).await;
+
+            let sender_clone = self.event_sender.clone();
             tokio::spawn(async move {
-                let mut client = client_clone.lock().await;
-                while let Some(event) = client.receive_event().await {
-                    println!("Received: {:?}", event);
+                let client = client.lock().await;
+                if let Err(e) = client
+                    .listen(move |event| {
+                        let sender = sender_clone.clone();
+                        tokio::spawn(async move {
+                            if sender.send(event).await.is_err() {
+                                eprintln!("Failed to forward event");
+                            }
+                        });
+                    })
+                    .await
+                {
+                    eprintln!("Error listening to client events: {:?}", e);
                 }
             });
         }
     }
 
-    pub async fn broadcast_event(&self, event: Event) {
-        self.sender.send(event).await.unwrap();
+    pub async fn listen_events<F>(&self, mut callback: F)
+    where
+        F: FnMut(Event) + Send + 'static,
+    {
+        let receiver = self.event_receiver.clone();
+        tokio::spawn(async move {
+            let mut receiver = receiver.lock().await;
+            while let Some(event) = receiver.recv().await {
+                callback(event);
+            }
+        });
     }
 
-    pub async fn event_dispatcher(&self, mut receiver: Receiver<Event>) {
-        while let Some(event) = receiver.recv().await {
-            if let Some(event_type) = models::deserialize(&event) {
-                println!("{:#?}", event_type);
+    pub async fn broadcast_event(&self, event: Event) -> Result<(), Box<dyn std::error::Error>> {
+        let clients = self.clients.lock().await;
+        for client in clients.iter() {
+            let client = client.lock().await;
+            if let Err(e) = client.send_event(&event).await {
+                eprintln!("Failed to send event to client: {:?}", e);
             }
         }
+        Ok(())
+    }
+
+    async fn register_client(&self, client: Arc<Mutex<Client>>) {
+        let mut clients = self.clients.lock().await;
+        clients.push(client);
     }
 }

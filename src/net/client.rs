@@ -1,35 +1,58 @@
+use super::models::Event;
+use std::sync::Arc;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{self, AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
+    sync::Mutex,
 };
 
-use super::models::Event;
-
+#[derive(Clone)]
 pub struct Client {
+    inner: Arc<Mutex<ClientInner>>,
+}
+
+struct ClientInner {
     stream: TcpStream,
+    buffer: Vec<u8>,
 }
 
 impl Client {
     pub fn new(stream: TcpStream) -> Self {
-        Client { stream }
+        Self {
+            inner: Arc::new(Mutex::new(ClientInner {
+                stream,
+                buffer: Vec::new(),
+            })),
+        }
     }
 
-    pub async fn send_event(&mut self, event: &Event) {
+    pub async fn send_event(&self, event: &Event) -> io::Result<()> {
+        let mut inner = self.inner.lock().await;
         let serialized = bincode::serialize(event).unwrap();
-        self.stream.write_all(&serialized).await.unwrap();
+        inner.stream.write_all(&serialized).await
     }
 
-    pub async fn receive_event(&mut self) -> Option<Event> {
-        let mut buffer = [0; 1024];
+    pub async fn listen<F>(&self, mut callback: F) -> io::Result<()>
+    where
+        F: FnMut(Event) + Send + 'static,
+    {
+        let mut inner = self.inner.lock().await;
+        loop {
+            let mut temp_buffer = [0; 1024];
+            let size = inner.stream.read(&mut temp_buffer).await?;
 
-        let size = self.stream.read(&mut buffer).await.unwrap_or(0);
+            if size == 0 {
+                break;
+            }
 
-        if size == 0 {
-            return None;
+            inner.buffer.extend_from_slice(&temp_buffer[..size]);
+
+            if let Ok(event) = bincode::deserialize::<Event>(&inner.buffer) {
+                inner.buffer.clear();
+                callback(event);
+            }
         }
 
-        let event: Event = bincode::deserialize(&buffer[..size]).unwrap();
-
-        Some(event)
+        Ok(())
     }
 }
