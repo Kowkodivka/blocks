@@ -4,12 +4,12 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{
     mpsc::{channel, Receiver, Sender},
-    Mutex,
+    Mutex, RwLock,
 };
 
 pub struct Server {
     listener: TcpListener,
-    clients: Arc<Mutex<Vec<Arc<Mutex<Client>>>>>,
+    clients: Arc<RwLock<Vec<Arc<Mutex<Client>>>>>, // Используем RwLock
     event_sender: Sender<Event>,
     event_receiver: Arc<Mutex<Receiver<Event>>>,
 }
@@ -18,7 +18,7 @@ impl Server {
     pub async fn new(addr: &str) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
         let listener = TcpListener::bind(addr).await?;
         let (event_sender, event_receiver) = channel::<Event>(100);
-        let clients = Arc::new(Mutex::new(Vec::new()));
+        let clients = Arc::new(RwLock::new(Vec::new())); // Инициализация RwLock
 
         Ok(Arc::new(Self {
             listener,
@@ -68,19 +68,8 @@ impl Server {
         });
     }
 
-    pub async fn broadcast_event(&self, event: Event) -> Result<(), Box<dyn std::error::Error>> {
-        let clients = self.clients.lock().await;
-        for client in clients.iter() {
-            let client = client.lock().await;
-            if let Err(e) = client.send_event(&event).await {
-                eprintln!("Failed to send event to client: {:?}", e);
-            }
-        }
-        Ok(())
-    }
-
     async fn register_client(&self, client: Arc<Mutex<Client>>) {
-        let mut clients = self.clients.lock().await;
+        let mut clients = self.clients.write().await; // Используем write для изменения списка
         clients.push(client);
     }
 }
