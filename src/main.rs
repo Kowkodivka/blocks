@@ -1,130 +1,93 @@
 use bevy::prelude::*;
 use net::{client::TcpClient, models::Event, server::TcpServer};
-use std::sync::Arc;
-use tokio::{net::TcpStream, spawn, time::Duration};
+use std::{net::TcpStream, sync::Arc, thread, time::Duration};
 
 mod net;
 
-// #[tokio::main]
-// async fn main() -> tokio::io::Result<()> {
-//     let addr = "127.0.0.1:8080";
-
-//     let server = Server::new(addr).await?;
-
-//     let server_handle = {
-//         let server = server.clone();
-//         spawn(async move {
-//             server.start().await.unwrap();
-//         })
-//     };
-
-//     tokio::time::sleep(Duration::from_secs(1)).await;
-
-//     let client_stream = TcpStream::connect(addr).await?;
-//     let client = Arc::new(Client::new(client_stream));
-
-//     let server_events = {
-//         let server = server.clone();
-//         spawn(async move {
-//             server
-//                 .listen_events(|event| {
-//                     println!("Сервер получил событие: {:?}", event);
-//                 })
-//                 .await;
-//         })
-//     };
-
-//     let client_events = {
-//         let client = client.clone();
-//         spawn(async move {
-//             client
-//                 .listen(|event| {
-//                     println!("Клиент получил событие: {:?}", event);
-//                 })
-//                 .await;
-//         })
-//     };
-
-//     let server_to_client = {
-//         let server = server.clone();
-//         spawn(async move {
-//             tokio::time::sleep(Duration::from_secs(2)).await;
-//             let event = Event {
-//                 opcode: 0,
-//                 data: "Hello from server".to_string(),
-//             };
-//             server.broadcast_event(event).await;
-//         })
-//     };
-
-//     let client_to_server = {
-//         let client = client.clone();
-//         spawn(async move {
-//             tokio::time::sleep(Duration::from_secs(3)).await;
-//             let event = Event {
-//                 opcode: 0,
-//                 data: "Hello from client".to_string(),
-//             };
-//             if let Err(e) = client.send(&event).await {
-//                 eprintln!("Ошибка отправки события от клиента: {:?}", e);
-//             }
-//         })
-//     };
-
-//     tokio::try_join!(
-//         server_handle,
-//         server_events,
-//         client_events,
-//         server_to_client,
-//         client_to_server
-//     )?;
-
-//     Ok(())
-// }
-
-#[tokio::main]
-async fn main() {
+fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
-        .add_systems(Startup, setup_server)
+        .add_systems(Startup, (setup_server, setup_client))
         .run();
 }
 
-fn setup_server(mut commands: Commands) {
-    tokio::spawn(async move {
+fn setup_server() {
+    thread::spawn(|| {
         let addr = "127.0.0.1:8080";
-        let server = TcpServer::new(addr).await.unwrap();
+        let server = TcpServer::new(addr).unwrap();
 
+        // Поток для запуска сервера
         let server_handle = {
             let server = server.clone();
-            spawn(async move {
-                server.start().await.unwrap();
+            thread::spawn(move || {
+                info!("Сервер запущен на {}", addr);
+                server.start().unwrap();
             })
         };
 
+        // Поток для обработки событий от клиентов
         let server_events = {
             let server = server.clone();
-            spawn(async move {
-                server
-                    .listen_events(|event| {
-                        println!("Сервер получил событие: {:?}", event);
-                    })
-                    .await;
+            thread::spawn(move || {
+                server.listen_events(|event| {
+                    info!("Сервер получил событие: {:?}", event);
+                });
             })
         };
 
+        // Поток для отправки события клиентам
         let server_to_client = {
             let server = server.clone();
-            spawn(async move {
-                tokio::time::sleep(Duration::from_secs(2)).await;
+            thread::spawn(move || {
+                thread::sleep(Duration::from_secs(5));
                 let event = Event {
                     opcode: 0,
                     data: "Hello from server".to_string(),
                 };
-                server.broadcast_event(event).await;
+                server.broadcast_event(event);
             })
         };
 
-        tokio::try_join!(server_handle, server_events, server_to_client).unwrap();
+        server_handle.join().unwrap();
+        server_events.join().unwrap();
+        server_to_client.join().unwrap();
+    });
+}
+
+fn setup_client() {
+    thread::spawn(|| {
+        thread::sleep(Duration::from_secs(2));
+
+        let addr = "127.0.0.1:8080";
+        let client_stream = TcpStream::connect(addr).unwrap();
+        let client = Arc::new(TcpClient::new(client_stream));
+
+        // Поток для обработки событий, полученных клиентом
+        let client_events = {
+            let client = client.clone();
+            thread::spawn(move || {
+                client.listen(|event| {
+                    info!("Клиент получил событие: {:?}", event);
+                });
+            })
+        };
+
+        // Поток для отправки события от клиента к серверу
+        let client_to_server = {
+            let client = client.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_secs(3));
+                let event = Event {
+                    opcode: 0,
+                    data: "Hello from client".to_string(),
+                };
+                if let Err(e) = client.send(&event) {
+                    error!("Ошибка отправки события от клиента: {:?}", e);
+                }
+            })
+        };
+
+        client_events.join().unwrap();
+        client_to_server.join().unwrap();
     });
 }

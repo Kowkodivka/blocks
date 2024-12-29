@@ -1,86 +1,92 @@
 use super::{client::TcpClient, models::Event};
-use std::sync::Arc;
-use tokio::{
+use std::{
+    io,
     net::TcpListener,
     sync::{
-        mpsc::{channel, Receiver, Sender},
-        RwLock,
+        mpsc::{self, Receiver, Sender},
+        Arc, Mutex,
     },
+    thread,
 };
 
 pub struct TcpServer {
     listener: TcpListener,
-    clients: Arc<RwLock<Vec<Arc<TcpClient>>>>,
+    clients: Arc<Mutex<Vec<Arc<TcpClient>>>>,
     event_sender: Sender<Event>,
-    event_receiver: Arc<tokio::sync::Mutex<Receiver<Event>>>,
+    event_receiver: Arc<Mutex<Receiver<Event>>>,
 }
 
 impl TcpServer {
-    pub async fn new(addr: &str) -> tokio::io::Result<Arc<Self>> {
-        let listener = TcpListener::bind(addr).await?;
-        let (event_sender, event_receiver) = channel::<Event>(100);
+    pub fn new(addr: &str) -> io::Result<Arc<Self>> {
+        let listener = TcpListener::bind(addr)?;
+        let (event_sender, event_receiver) = mpsc::channel::<Event>();
 
         Ok(Arc::new(Self {
             listener,
-            clients: Arc::new(RwLock::new(Vec::new())),
+            clients: Arc::new(Mutex::new(Vec::new())),
             event_sender,
-            event_receiver: Arc::new(tokio::sync::Mutex::new(event_receiver)),
+            event_receiver: Arc::new(Mutex::new(event_receiver)),
         }))
     }
 
-    pub async fn start(self: Arc<Self>) -> tokio::io::Result<()> {
-        loop {
-            let (stream, _) = self.listener.accept().await?;
-            let client = Arc::new(TcpClient::new(stream));
-            self.register_client(client.clone()).await;
+    pub fn start(self: Arc<Self>) -> io::Result<()> {
+        for stream in self.listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    let client = Arc::new(TcpClient::new(stream));
+                    self.register_client(client.clone());
 
-            let server = Arc::clone(&self);
-            tokio::spawn(async move {
-                if let Err(e) = server.handle_client(client).await {
-                    eprintln!("Error handling client: {:?}", e);
+                    let server = Arc::clone(&self);
+                    thread::spawn(move || {
+                        if let Err(e) = server.handle_client(client) {
+                            eprintln!("Error handling client: {:?}", e);
+                        }
+                    });
                 }
-            });
+                Err(e) => {
+                    eprintln!("Failed to accept connection: {:?}", e);
+                }
+            }
         }
+        Ok(())
     }
 
-    pub async fn broadcast_event(&self, event: Event) {
-        let clients = self.clients.read().await;
+    pub fn broadcast_event(&self, event: Event) {
+        let clients = self.clients.lock().unwrap();
         for client in clients.iter() {
             let event = event.clone();
             let client = client.clone();
-            tokio::spawn(async move {
-                if let Err(e) = client.send(&event).await {
+            thread::spawn(move || {
+                if let Err(e) = client.send(&event) {
                     eprintln!("Failed to send event to client: {:?}", e);
                 }
             });
         }
     }
 
-    pub async fn listen_events<F>(&self, mut callback: F)
+    pub fn listen_events<F>(&self, mut callback: F)
     where
         F: FnMut(Event) + Send + 'static,
     {
-        let mut receiver = self.event_receiver.lock().await;
-        while let Some(event) = receiver.recv().await {
+        let receiver = self.event_receiver.lock().unwrap();
+        for event in receiver.iter() {
             callback(event);
         }
     }
 
-    async fn handle_client(self: Arc<Self>, client: Arc<TcpClient>) -> tokio::io::Result<()> {
+    fn handle_client(self: Arc<Self>, client: Arc<TcpClient>) -> io::Result<()> {
         let sender = self.event_sender.clone();
-        client
-            .listen(move |event| {
-                let sender = sender.clone();
-                tokio::spawn(async move {
-                    let _ = sender.send(event).await;
-                });
-            })
-            .await;
+        client.listen(move |event| {
+            let sender = sender.clone();
+            thread::spawn(move || {
+                let _ = sender.send(event);
+            });
+        });
         Ok(())
     }
 
-    async fn register_client(&self, client: Arc<TcpClient>) {
-        let mut clients = self.clients.write().await;
+    fn register_client(&self, client: Arc<TcpClient>) {
+        let mut clients = self.clients.lock().unwrap();
         clients.push(client);
     }
 }

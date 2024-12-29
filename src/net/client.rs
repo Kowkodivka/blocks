@@ -1,23 +1,20 @@
 use super::models::Event;
-use std::{io, sync::Arc};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{
-        tcp::{OwnedReadHalf, OwnedWriteHalf},
-        TcpStream,
-    },
-    sync::Mutex,
+use std::{
+    io::{self, Read, Write},
+    net::TcpStream,
+    sync::{Arc, Mutex},
 };
 
 pub struct TcpClient {
-    reader: Arc<Mutex<OwnedReadHalf>>,
-    writer: Arc<Mutex<OwnedWriteHalf>>,
+    reader: Arc<Mutex<TcpStream>>,
+    writer: Arc<Mutex<TcpStream>>,
     buffer: Arc<Mutex<Vec<u8>>>,
 }
 
 impl TcpClient {
     pub fn new(stream: TcpStream) -> Self {
-        let (reader, writer) = stream.into_split();
+        let reader = stream.try_clone().expect("Failed to clone stream");
+        let writer = stream;
         Self {
             reader: Arc::new(Mutex::new(reader)),
             writer: Arc::new(Mutex::new(writer)),
@@ -25,34 +22,36 @@ impl TcpClient {
         }
     }
 
-    pub async fn listen<F>(&self, mut callback: F)
+    pub fn listen<F>(&self, mut callback: F)
     where
-        F: FnMut(Event) + Send + 'static,
+        F: FnMut(Event),
     {
         let mut temp_buffer = [0; 1024];
-
         loop {
-            if let Ok(size) = self.reader.lock().await.read(&mut temp_buffer).await {
-                if size > 0 {
-                    let mut buffer = self.buffer.lock().await;
-                    buffer.extend_from_slice(&temp_buffer[..size]);
+            let size = {
+                let mut reader = self.reader.lock().unwrap();
+                reader.read(&mut temp_buffer).unwrap_or(0)
+            };
 
-                    while let Some(event_size) = Self::try_deserialize(&buffer) {
-                        let event_data = buffer.drain(..event_size).collect::<Vec<_>>();
-                        if let Ok(event) = bincode::deserialize::<Event>(&event_data) {
-                            callback(event);
-                        }
+            if size > 0 {
+                let mut buffer = self.buffer.lock().unwrap();
+                buffer.extend_from_slice(&temp_buffer[..size]);
+
+                while let Some(event_size) = Self::try_deserialize(&buffer) {
+                    let event_data = buffer.drain(..event_size).collect::<Vec<_>>();
+                    if let Ok(event) = bincode::deserialize::<Event>(&event_data) {
+                        callback(event);
                     }
                 }
             }
         }
     }
 
-    pub async fn send(&self, event: &Event) -> io::Result<()> {
+    pub fn send(&self, event: &Event) -> io::Result<()> {
         let serialized = bincode::serialize(event)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Serialization failed"))?;
-        let mut writer = self.writer.lock().await;
-        writer.write_all(&serialized).await
+        let mut writer = self.writer.lock().unwrap();
+        writer.write_all(&serialized)
     }
 
     fn try_deserialize(buffer: &[u8]) -> Option<usize> {
