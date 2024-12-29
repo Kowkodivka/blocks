@@ -1,5 +1,10 @@
-use super::{client::TcpClient, models::Event};
+use super::{
+    client::TcpClient,
+    models::{Event, EventType},
+};
+use bevy::prelude::*;
 use std::{
+    any::Any,
     io,
     net::TcpListener,
     sync::{
@@ -39,12 +44,12 @@ impl TcpServer {
                     let server = Arc::clone(&self);
                     thread::spawn(move || {
                         if let Err(e) = server.handle_client(client) {
-                            eprintln!("Error handling client: {:?}", e);
+                            error!("Error handling client: {:?}", e);
                         }
                     });
                 }
                 Err(e) => {
-                    eprintln!("Failed to accept connection: {:?}", e);
+                    error!("Failed to accept connection: {:?}", e);
                 }
             }
         }
@@ -58,7 +63,7 @@ impl TcpServer {
             let client = client.clone();
             thread::spawn(move || {
                 if let Err(e) = client.send(&event) {
-                    eprintln!("Failed to send event to client: {:?}", e);
+                    error!("Failed to send event to client: {:?}", e);
                 }
             });
         }
@@ -72,6 +77,38 @@ impl TcpServer {
         for event in receiver.iter() {
             callback(event);
         }
+    }
+
+    // TODO: убрать кучу match для событий
+    pub fn listen_event<E, F>(&self, mut callback: F)
+    where
+        E: 'static + Clone + Send,
+        F: FnMut(E) + Send + 'static,
+    {
+        let receiver = Arc::clone(&self.event_receiver);
+
+        thread::spawn(move || {
+            let receiver = receiver.lock().unwrap();
+            for event in receiver.iter() {
+                let event_type = EventType::from_event(&event);
+
+                match event_type {
+                    EventType::Hello(e) => {
+                        if let Some(specific_event) = Self::try_cast::<E>(&e) {
+                            callback(specific_event);
+                        }
+                    }
+                    EventType::Heartbeat(e) => {
+                        if let Some(specific_event) = Self::try_cast::<E>(&e) {
+                            callback(specific_event);
+                        }
+                    }
+                    EventType::Unknown(opcode, data) => {
+                        error!("Unknown event received with opcode {}: {}", opcode, data);
+                    }
+                }
+            }
+        });
     }
 
     fn handle_client(self: Arc<Self>, client: Arc<TcpClient>) -> io::Result<()> {
@@ -88,5 +125,9 @@ impl TcpServer {
     fn register_client(&self, client: Arc<TcpClient>) {
         let mut clients = self.clients.lock().unwrap();
         clients.push(client);
+    }
+
+    fn try_cast<T: 'static + Clone>(obj: &dyn Any) -> Option<T> {
+        obj.downcast_ref::<T>().cloned()
     }
 }
