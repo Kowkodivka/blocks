@@ -1,50 +1,56 @@
-use super::client::Client;
-use super::models::Event;
+use super::{client::Client, models::Event};
 use std::sync::Arc;
-use tokio::net::TcpListener;
-use tokio::sync::{mpsc, Mutex};
+use tokio::{
+    net::TcpListener,
+    sync::{
+        mpsc::{channel, Receiver, Sender},
+        RwLock,
+    },
+};
 
 pub struct Server {
     listener: TcpListener,
-    pub clients: Arc<Mutex<Vec<Client>>>,
-    event_sender: mpsc::Sender<Event>,
-    event_receiver: Arc<Mutex<mpsc::Receiver<Event>>>,
+    clients: Arc<RwLock<Vec<Arc<Client>>>>,
+    event_sender: Sender<Event>,
+    event_receiver: Arc<tokio::sync::Mutex<Receiver<Event>>>,
 }
 
 impl Server {
-    pub async fn new(addr: &str) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
+    pub async fn new(addr: &str) -> tokio::io::Result<Arc<Self>> {
         let listener = TcpListener::bind(addr).await?;
-        let (event_sender, event_receiver) = mpsc::channel::<Event>(100);
+        let (event_sender, event_receiver) = channel::<Event>(100);
 
         Ok(Arc::new(Self {
             listener,
-            clients: Arc::new(Mutex::new(Vec::new())),
+            clients: Arc::new(RwLock::new(Vec::new())),
             event_sender,
-            event_receiver: Arc::new(Mutex::new(event_receiver)),
+            event_receiver: Arc::new(tokio::sync::Mutex::new(event_receiver)),
         }))
     }
 
-    pub async fn start(self: Arc<Self>) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn start(self: Arc<Self>) -> tokio::io::Result<()> {
         loop {
             let (stream, _) = self.listener.accept().await?;
-            let client = Client::new(stream);
-
-            println!("New client connected");
-
+            let client = Arc::new(Client::new(stream));
             self.register_client(client.clone()).await;
 
-            let server_clone = Arc::clone(&self);
+            let server = Arc::clone(&self);
             tokio::spawn(async move {
-                if let Err(e) = client
-                    .listen(move |event| {
-                        let sender = server_clone.event_sender.clone();
-                        tokio::spawn(async move {
-                            let _ = sender.send(event).await;
-                        });
-                    })
-                    .await
-                {
-                    eprintln!("Client listener error: {:?}", e);
+                if let Err(e) = server.handle_client(client).await {
+                    eprintln!("Error handling client: {:?}", e);
+                }
+            });
+        }
+    }
+
+    pub async fn broadcast_event(&self, event: Event) {
+        let clients = self.clients.read().await;
+        for client in clients.iter() {
+            let event = event.clone();
+            let client = client.clone();
+            tokio::spawn(async move {
+                if let Err(e) = client.send(&event).await {
+                    eprintln!("Failed to send event to client: {:?}", e);
                 }
             });
         }
@@ -55,44 +61,26 @@ impl Server {
         F: FnMut(Event) + Send + 'static,
     {
         let mut receiver = self.event_receiver.lock().await;
-
         while let Some(event) = receiver.recv().await {
-            println!("Event received by server: {:?}", event);
             callback(event);
         }
     }
 
-    pub async fn broadcast_event(&self, event: Event) -> Result<(), Box<dyn std::error::Error>> {
-        let mut clients = self.clients.lock().await;
-
-        let mut connected_clients = Vec::new();
-        for client in clients.iter() {
-            if client.is_connected().await {
-                connected_clients.push(client.clone());
-            } else {
-                println!("Removing disconnected client");
-            }
-        }
-
-        *clients = connected_clients;
-
-        let send_tasks = clients.iter().map(|client| {
-            let event = event.clone();
-            async move {
-                if let Err(e) = client.send_event(&event).await {
-                    eprintln!("Failed to send event to client: {:?}", e);
-                }
-            }
-        });
-
-        futures::future::join_all(send_tasks).await;
-
+    async fn handle_client(self: Arc<Self>, client: Arc<Client>) -> tokio::io::Result<()> {
+        let sender = self.event_sender.clone();
+        client
+            .listen(move |event| {
+                let sender = sender.clone();
+                tokio::spawn(async move {
+                    let _ = sender.send(event).await;
+                });
+            })
+            .await;
         Ok(())
     }
 
-    async fn register_client(&self, client: Client) {
-        let mut clients = self.clients.lock().await;
+    async fn register_client(&self, client: Arc<Client>) {
+        let mut clients = self.clients.write().await;
         clients.push(client);
-        println!("Client registered. Total clients: {}", clients.len());
     }
 }
