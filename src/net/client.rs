@@ -9,13 +9,13 @@ use tokio::{
     sync::Mutex,
 };
 
-pub struct Client {
+pub struct TcpClient {
     reader: Arc<Mutex<OwnedReadHalf>>,
     writer: Arc<Mutex<OwnedWriteHalf>>,
     buffer: Arc<Mutex<Vec<u8>>>,
 }
 
-impl Client {
+impl TcpClient {
     pub fn new(stream: TcpStream) -> Self {
         let (reader, writer) = stream.into_split();
         Self {

@@ -1,4 +1,4 @@
-use super::{client::Client, models::Event};
+use super::{client::TcpClient, models::Event};
 use std::sync::Arc;
 use tokio::{
     net::TcpListener,
@@ -8,14 +8,14 @@ use tokio::{
     },
 };
 
-pub struct Server {
+pub struct TcpServer {
     listener: TcpListener,
-    clients: Arc<RwLock<Vec<Arc<Client>>>>,
+    clients: Arc<RwLock<Vec<Arc<TcpClient>>>>,
     event_sender: Sender<Event>,
     event_receiver: Arc<tokio::sync::Mutex<Receiver<Event>>>,
 }
 
-impl Server {
+impl TcpServer {
     pub async fn new(addr: &str) -> tokio::io::Result<Arc<Self>> {
         let listener = TcpListener::bind(addr).await?;
         let (event_sender, event_receiver) = channel::<Event>(100);
@@ -31,7 +31,7 @@ impl Server {
     pub async fn start(self: Arc<Self>) -> tokio::io::Result<()> {
         loop {
             let (stream, _) = self.listener.accept().await?;
-            let client = Arc::new(Client::new(stream));
+            let client = Arc::new(TcpClient::new(stream));
             self.register_client(client.clone()).await;
 
             let server = Arc::clone(&self);
@@ -66,7 +66,7 @@ impl Server {
         }
     }
 
-    async fn handle_client(self: Arc<Self>, client: Arc<Client>) -> tokio::io::Result<()> {
+    async fn handle_client(self: Arc<Self>, client: Arc<TcpClient>) -> tokio::io::Result<()> {
         let sender = self.event_sender.clone();
         client
             .listen(move |event| {
@@ -79,7 +79,7 @@ impl Server {
         Ok(())
     }
 
-    async fn register_client(&self, client: Arc<Client>) {
+    async fn register_client(&self, client: Arc<TcpClient>) {
         let mut clients = self.clients.write().await;
         clients.push(client);
     }

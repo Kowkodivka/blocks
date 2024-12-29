@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+bevy = "0.15.0"
 bincode = "1.3.3"
 futures = "0.3.31"
 serde = { version = "1.0.216", features = ["derive"] }
